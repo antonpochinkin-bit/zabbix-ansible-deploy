@@ -1,0 +1,314 @@
+---
+- name: Интерактивное развертывание Zabbix Server с HTTPS (Nginx reverse proxy)
+  hosts: localhost
+  connection: local
+  gather_facts: no
+  vars_prompt:
+    - name: "target_host"
+      prompt: "Введите IP адрес сервера для установки Zabbix"
+      private: no
+      default: "192.168.88.189"
+
+    - name: "ssh_user"
+      prompt: "Введите имя пользователя для подключения по SSH"
+      private: no
+      default: "anton"
+
+    - name: "ssh_password"
+      prompt: "Введите SSH пароль"
+      private: yes
+      confirm: yes
+
+    - name: "sudo_password"
+      prompt: "Введите SUDO пароль (для получения прав root)"
+      private: yes
+      confirm: yes
+
+  tasks:
+    - name: Создание временного инвентаря
+      ansible.builtin.add_host:
+        name: "{{ target_host }}"
+        groups: target_servers
+        ansible_user: "{{ ssh_user }}"
+        ansible_ssh_pass: "{{ ssh_password }}"
+        ansible_become_pass: "{{ sudo_password }}"
+        ansible_connection: ssh
+        ansible_ssh_common_args: '-o StrictHostKeyChecking=no'
+
+    - name: Сохраняем переменные для следующего play
+      ansible.builtin.set_fact:
+        saved_target_host: "{{ target_host }}"
+        saved_ssh_user: "{{ ssh_user }}"
+
+- name: Основные задачи на целевом сервере
+  hosts: target_servers
+  become: yes
+  gather_facts: yes
+  vars:
+    target_host: "{{ hostvars['localhost']['saved_target_host'] }}"
+    ssh_user: "{{ hostvars['localhost']['saved_ssh_user'] }}"
+    postgres_password: "zabbix_password"
+    zabbix_admin_password: "zabbix"
+    docker_compose_dir: "/opt/zabbix-docker"
+    zabbix_agent_conf: "/etc/zabbix/zabbix_agent2.conf"
+
+  tasks:
+    - name: Проверка подключения к серверу
+      ansible.builtin.ping:
+
+    - name: Информация о сервере
+      ansible.builtin.debug:
+        msg: 
+          - "Подключение к серверу {{ target_host }} успешно"
+          - "ОС: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+
+    - name: Обновление кэша пакетов
+      ansible.builtin.apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Обновление всех пакетов системы
+      ansible.builtin.apt:
+        upgrade: dist
+        autoremove: yes
+        autoclean: yes
+
+    - name: Установка зависимостей
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - wget
+          - software-properties-common
+          - python3-pip
+          - openssl
+          - acl
+        state: present
+
+    - name: Добавление GPG-ключа Docker
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Добавление репозитория Docker
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+        state: present
+        update_cache: yes
+
+    - name: Установка Docker и Docker Compose
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        state: present
+
+    - name: Запуск Docker и добавление в автозагрузку
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Добавление пользователя в группу docker
+      ansible.builtin.user:
+        name: "{{ ssh_user }}"
+        groups: docker
+        append: yes
+
+    - name: Создание директории для Zabbix
+      ansible.builtin.file:
+        path: "{{ docker_compose_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Создание директории для SSL сертификатов
+      ansible.builtin.file:
+        path: "{{ docker_compose_dir }}/ssl"
+        state: directory
+        mode: '0755'
+
+    - name: Генерация самоподписанного SSL сертификата
+      ansible.builtin.shell: |
+        cd {{ docker_compose_dir }}/ssl
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+          -keyout zabbix.key \
+          -out zabbix.crt \
+          -subj "/C=RU/ST=Moscow/L=Moscow/O=Zabbix/CN={{ target_host }}"
+        chmod 600 zabbix.key
+        chmod 644 zabbix.crt
+      args:
+        creates: "{{ docker_compose_dir }}/ssl/zabbix.crt"
+
+    - name: Создание конфигурации Nginx для reverse proxy
+      ansible.builtin.copy:
+        dest: "{{ docker_compose_dir }}/nginx.conf"
+        content: |
+          events {
+              worker_connections 1024;
+          }
+          
+          http {
+              upstream zabbix {
+                  server zabbix-web:8080;
+              }
+          
+              server {
+                  listen 80;
+                  server_name {{ target_host }};
+                  return 301 https://$server_name$request_uri;
+              }
+          
+              server {
+                  listen 443 ssl http2;
+                  server_name {{ target_host }};
+          
+                  ssl_certificate /etc/nginx/ssl/zabbix.crt;
+                  ssl_certificate_key /etc/nginx/ssl/zabbix.key;
+          
+                  location / {
+                      proxy_pass http://zabbix;
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                      proxy_set_header X-Forwarded-Proto $scheme;
+                  }
+              }
+          }
+        mode: '0644'
+
+    - name: Копирование docker-compose.yml на сервер
+      ansible.builtin.template:
+        src: docker-compose.yml.j2
+        dest: "{{ docker_compose_dir }}/docker-compose.yml"
+        mode: '0644'
+
+    - name: Исправление прав на Docker socket
+      ansible.builtin.file:
+        path: /var/run/docker.sock
+        mode: '0666'
+
+    - name: Полная остановка и удаление всех контейнеров
+      ansible.builtin.shell: |
+        cd {{ docker_compose_dir }}
+        docker compose down --remove-orphans -v 2>/dev/null || true
+        docker rm -f zabbix-web zabbix-server zabbix-postgres nginx-proxy 2>/dev/null || true
+      ignore_errors: yes
+
+    - name: Запуск контейнеров Zabbix
+      ansible.builtin.shell: |
+        cd {{ docker_compose_dir }}
+        docker compose up -d --remove-orphans
+      register: compose_start
+
+    - name: Ожидание запуска контейнеров
+      ansible.builtin.pause:
+        seconds: 45
+
+    - name: Проверка статуса контейнеров
+      ansible.builtin.shell: |
+        echo "ЗАПУЩЕННЫЕ КОНТЕЙНЕРЫ:"
+        docker ps --format "table {{ '{{' }}.Names{{ '}}' }}\t{{ '{{' }}.Status{{ '}}' }}"
+      register: container_status
+
+    - name: Вывод статуса контейнеров
+      ansible.builtin.debug:
+        var: container_status.stdout_lines
+
+    - name: Проверка доступности Zabbix через Nginx (на сервере)
+      ansible.builtin.shell: |
+        curl -k -s -o /dev/null -w "%{http_code}" https://{{ target_host }} || echo "000"
+      register: https_check
+      ignore_errors: yes
+
+    - name: Проверка доступности Zabbix через HTTP (на сервере)
+      ansible.builtin.shell: |
+        curl -s -o /dev/null -w "%{http_code}" http://{{ target_host }} || echo "000"
+      register: http_check
+      ignore_errors: yes
+
+    - name: Результаты проверки
+      ansible.builtin.debug:
+        msg:
+          - "HTTP доступен (код): {{ http_check.stdout }}"
+          - "HTTPS доступен (код): {{ https_check.stdout }}"
+
+    - name: Добавление репозитория Zabbix для агента
+      ansible.builtin.shell: |
+        wget -O /tmp/zabbix-release.deb https://repo.zabbix.com/zabbix/7.0/ubuntu/pool/main/z/zabbix-release/zabbix-release_7.0-1+ubuntu24.04_all.deb
+        dpkg -i /tmp/zabbix-release.deb
+        apt update
+      args:
+        creates: /etc/apt/sources.list.d/zabbix.list
+
+    - name: Установка Zabbix Agent 2
+      ansible.builtin.apt:
+        name: zabbix-agent2
+        state: present
+
+    - name: Настройка конфигурации Zabbix Agent
+      ansible.builtin.lineinfile:
+        path: "{{ zabbix_agent_conf }}"
+        regexp: "^{{ item.parameter }}="
+        line: "{{ item.parameter }}={{ item.value }}"
+        backup: yes
+      loop:
+        - { parameter: "Server", value: "127.0.0.1" }
+        - { parameter: "ServerActive", value: "127.0.0.1" }
+        - { parameter: "Hostname", value: "Zabbix server" }
+        - { parameter: "ListenPort", value: "10050" }
+        - { parameter: "ListenIP", value: "0.0.0.0" }
+
+    - name: Запуск и включение Zabbix Agent
+      ansible.builtin.systemd:
+        name: zabbix-agent2
+        state: restarted
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Проверка работы агента
+      ansible.builtin.shell: |
+        echo "СТАТУС АГЕНТА:"
+        systemctl status zabbix-agent2 --no-pager | grep "Active:"
+        echo ""
+        echo "ПРОВЕРКА МЕТРИК:"
+        zabbix_agent2 -t agent.ping
+        zabbix_agent2 -t system.cpu.load
+      register: agent_check
+      ignore_errors: yes
+
+    - name: Итоговая информация
+      ansible.builtin.debug:
+        msg:
+          - "========================================"
+          - " РАЗВЕРТЫВАНИЕ ЗАВЕРШЕНО УСПЕШНО!"
+          - "========================================"
+          - "СЕРВЕР: {{ target_host }}"
+          - ""
+          - "ДОСТУП К ZABBIX:"
+          - "    HTTPS: https://{{ target_host }}"
+          - "    HTTP:  http://{{ target_host }} (перенаправляет на HTTPS)"
+          - "  Логин: Admin"
+          - "  Пароль: zabbix"
+          - ""
+          - "СТАТУС НА СЕРВЕРЕ:"
+          - "  • HTTPS код ответа: {{ https_check.stdout }}"
+          - "  • HTTP код ответа: {{ http_check.stdout }}"
+          - "  • Контейнеры: ЗАПУЩЕНЫ"
+          - "  • Агент: {{ 'РАБОТАЕТ' if agent_check is success else 'ПРОВЕРЬТЕ' }}"
+          - ""
+          - " ПРИМЕЧАНИЕ ПО HTTPS:"
+          - "  • Сертификат самоподписанный"
+          - "  • Браузер покажет предупреждение - нажмите 'Принять риск'"
+          - "  • Для проверки: curl -k https://{{ target_host }}"
+          - ""
+          - "ПРОВЕРКА МЕТРИК:"
+          - "  1. Откройте браузер: https://{{ target_host }}"
+          - "  2. Примите предупреждение о сертификате"
+          - "  3. Войдите с логином Admin / zabbix"
+          - "  4. Перейдите в Monitoring → Latest data"
+          - "  5. Выберите хост 'Zabbix server'"
+          - "========================================"
