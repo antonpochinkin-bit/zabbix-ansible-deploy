@@ -56,9 +56,11 @@ sudo apt update && sudo apt install ansible -y
 ansible-galaxy collection install community.docker
 ansible-galaxy collection install community.docker
 
-# 2. Склонируйте репозиторий
+### *Шаг 2:* Склонируйте репозиторий
+
 git clone https://github.com/antonpochinkin-bit/zabbix-ansible-deploy.git
 cd zabbix-ansible-deploy
 
-# 3. ЗАПУСТИТЕ РАЗВЕРТЫВАНИЕ 
+### Шаг 3: ЗАПУСТИТЕ РАЗВЕРТЫВАНИЕ 
+
 ansible-playbook zabbix-deploy.yml
