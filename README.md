@@ -9,8 +9,6 @@
 - Имя пользователя SSH
 - SSH пароль
 - SUDO пароль
-- Пароль для PostgreSQL
-- Пароль для Admin в Zabbix
 
 ---
 
