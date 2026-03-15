@@ -42,9 +42,9 @@
 
 ---
 
-##  ПОШАГОВАЯ ИНСТРУКЦИЯ ПО ЗАПУСКУ
+###  ПОШАГОВАЯ ИНСТРУКЦИЯ ПО ЗАПУСКУ
 
-### Шаг 1: Подготовка управляющей машины
+### Подготовка управляющей машины
 
 Откройте терминал на вашем компьютере и выполните:
 
@@ -56,11 +56,11 @@ sudo apt update && sudo apt install ansible -y
 ansible-galaxy collection install community.docker
 ansible-galaxy collection install community.docker
 
-### *Шаг 2:* Склонируйте репозиторий
+### Склонируйте репозиторий
 
 git clone https://github.com/antonpochinkin-bit/zabbix-ansible-deploy.git
 cd zabbix-ansible-deploy
 
-### Шаг 3: ЗАПУСТИТЕ РАЗВЕРТЫВАНИЕ 
+### ЗАПУСТИТЕ РАЗВЕРТЫВАНИЕ 
 
 ansible-playbook zabbix-deploy.yml
