@@ -60,5 +60,5 @@ ansible-galaxy collection install community.docker
 git clone https://github.com/antonpochinkin-bit/zabbix-ansible-deploy.git
 cd zabbix-ansible-deploy
 
-# 3. ЗАПУСТИТЕ РАЗВЕРТЫВАНИЕ (самая важная команда!)
+# 3. ЗАПУСТИТЕ РАЗВЕРТЫВАНИЕ 
 ansible-playbook zabbix-deploy.yml
